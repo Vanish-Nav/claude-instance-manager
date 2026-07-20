@@ -1,0 +1,77 @@
+{
+  "name": "claude-instance-manager-desktop",
+  "version": "1.0.0",
+  "description": "A cross-platform manager for isolated Claude Desktop profiles.",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "build:taskbar-helper": "dotnet publish taskbar-helper/TaskbarHelper.csproj -c Release -r win-x64 --ignore-failed-sources",
+    "package:win": "npm run build:taskbar-helper && npm run build && electron-builder --win --x64",
+    "package:portable": "npm run build && electron-builder --win portable --x64",
+    "package:mac": "npm run build && electron-builder --mac"
+  },
+  "author": "",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^2.0.0",
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "lucide-react": "^1.25.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "build": {
+    "appId": "com.claudeinstancemanager.desktop",
+    "productName": "Claude Instance Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "electronLanguages": [
+      "en-US",
+      "ru"
+    ],
+    "extraResources": [
+      {
+        "from": "../Assets",
+        "to": "Assets",
+        "filter": [
+          "claude-instance-manager.ico",
+          "claude-profile-*.ico"
+        ]
+      },
+      {
+        "from": "taskbar-helper/bin/Release/net10.0-windows/win-x64/publish/TaskbarHelper.exe",
+        "to": "TaskbarHelper.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "../Assets/claude-instance-manager.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    }
+  }
+}
