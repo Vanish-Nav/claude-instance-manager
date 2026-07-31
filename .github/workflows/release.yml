@@ -51,16 +51,6 @@ jobs:
       - name: Build portable executable
         run: npm run package:portable
 
-      - name: Remove obsolete portable asset
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete-asset "${{ github.ref_name }}" "Claude Instance Manager 1.0.0.exe" --yes 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "No obsolete portable asset to remove."
-          }
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
