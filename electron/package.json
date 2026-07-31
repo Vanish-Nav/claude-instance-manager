@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
     "build:taskbar-helper": "dotnet publish taskbar-helper/TaskbarHelper.csproj -c Release -r win-x64 --ignore-failed-sources",
     "package:win": "npm run build:taskbar-helper && npm run build && electron-builder --win --x64",
-    "package:portable": "npm run build && electron-builder --win portable --x64",
+    "package:portable": "npm run build:taskbar-helper && npm run build && electron-builder --win portable --x64",
     "package:mac": "npm run build && electron-builder --mac"
   },
   "author": "",
@@ -68,6 +68,9 @@
       "createDesktopShortcut": false,
       "createStartMenuShortcut": false,
       "include": "build/installer.nsh"
+    },
+    "portable": {
+      "artifactName": "${productName} Portable ${version}.${ext}"
     },
     "mac": {
       "target": "dmg",
