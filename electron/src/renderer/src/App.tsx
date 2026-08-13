@@ -816,7 +816,7 @@ export default function App() {
                   confirmAction({
                     title: "Update portable runtime?",
                     description:
-                      "All running Claude instances will be closed before the portable runtime is updated from the installed Claude Desktop app.",
+                      "Quit every Claude instance from its tray menu first. The update will start only after Claude has fully closed.",
                     confirmLabel: "Update runtime",
                     busyLabel: "Updating portable runtime",
                     dangerous: true,

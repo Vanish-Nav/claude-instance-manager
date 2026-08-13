@@ -84,15 +84,31 @@ export class WindowsAdapter implements PlatformAdapter {
     // Robocopy needs elevation to read the WindowsApps installation directory.
     // Run that fixed command through UAC directly instead of creating a .ps1
     // file and bypassing the user's PowerShell execution policy.
-    const copyCommand = `& robocopy.exe ${ps(source)} ${ps(this.portablePath)} /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null; if ($LASTEXITCODE -gt 7) { exit $LASTEXITCODE }`
-    const elevatedArguments = `-NoProfile -NonInteractive -WindowStyle Hidden -Command \"${copyCommand.replaceAll('"', '`"')}\"`
+    // Robocopy reserves 0 through 7 for successful outcomes (for example,
+    // files copied or extra files removed). Explicitly return 0 for all of
+    // them so the UAC launcher and Electron do not report a false failure.
+    const copyCommand = `& robocopy.exe ${ps(source)} ${ps(this.portablePath)} /MIR /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null; if ($LASTEXITCODE -gt 7) { exit $LASTEXITCODE }; exit 0`
+    // Passing a nested -Command through Start-Process makes Windows command
+    // line parsing responsible for two layers of quotes. WindowsApps paths
+    // and user profile paths can expose that issue. EncodedCommand keeps the
+    // elevated invocation a fixed command without needing a temporary script.
+    const encodedCopyCommand = Buffer.from(copyCommand, 'utf16le').toString('base64')
+    const elevatedArguments = `-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${encodedCopyCommand}`
     const launcher = `$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ArgumentList ${ps(elevatedArguments)}; if ($process.ExitCode -gt 7) { exit $process.ExitCode }`
-    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', launcher])
+    try {
+      await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', launcher])
+    } catch (error) {
+      const exitCode = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown'
+      throw new Error(`Could not copy the installed Claude runtime (robocopy exit code ${exitCode}). Close Claude, approve the administrator prompt, and try again.`)
+    }
     if (await missing(this.portableExe)) throw new Error('The portable copy was not created. Approve the administrator prompt and try again.')
   }
 
   async updatePortable(): Promise<void> {
-    await this.stopAllClaude()
+    // Updating files below WindowsApps while Claude is still running can leave
+    // the installed app's tray/process-singleton in an inconsistent state.
+    // Let the user close Claude normally, so it can persist its state first.
+    if (await this.anyClaudeRunning()) throw new Error('Quit every Claude instance from its tray menu, then try updating the portable runtime again.')
     await this.preparePortable()
   }
 
