@@ -1,7 +1,7 @@
 # Architecture and storage
 
 - The product is Electron-only. The legacy Windows project is not part of the supported application path.
-- The primary Claude profile is `%APPDATA%\Claude` and is shown as **Claude** with the `PRIMARY` badge.
+- The primary Claude profile may be `%APPDATA%\Claude` or `%APPDATA%\Claude Code` and is shown as **Claude** with the `PRIMARY` badge. If both exist, prefer `%APPDATA%\Claude`.
 - Isolated profiles are stored at `%LOCALAPPDATA%\ClaudeInstanceManager\Profiles\CIM-Profile-<GUID>`.
 - A profile folder name is immutable. Display name and color are stored in `instance.json` in the profile root so renaming does not break paths or shortcuts.
 - Instance names accept up to 20 English letters, digits, and spaces. Name collisions are resolved or rejected by the profile-management flow.

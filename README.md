@@ -54,7 +54,7 @@ Create a profile with a name, colour, and optional Desktop or Start menu shortcu
 
 ## Local data
 
-- Regular Claude profile: `%APPDATA%\Claude`
+- Regular Claude profile: `%APPDATA%\Claude` or `%APPDATA%\Claude Code` (the former takes priority if both exist)
 - Isolated profiles: `%LOCALAPPDATA%\ClaudeInstanceManager\Profiles`
 - Portable Claude and backups: `%LOCALAPPDATA%\ClaudeInstanceManager`
 

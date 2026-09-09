@@ -17,7 +17,12 @@ export class WindowsAdapter implements PlatformAdapter {
   readonly platform = 'windows' as const
   private readonly appData = process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData', 'Roaming')
   private readonly localData = path.join(process.env.LOCALAPPDATA ?? this.appData, 'ClaudeInstanceManager')
-  private readonly defaultPath = path.join(this.appData, 'Claude')
+  // Claude Desktop has used both names for its primary roaming profile. Keep
+  // the original path as the Sign In hand-off location because the official
+  // app's callback is registered against it, but recognise either location
+  // when displaying and preserving the user's regular profile.
+  private readonly claudeProfilePath = path.join(this.appData, 'Claude')
+  private readonly claudeCodeProfilePath = path.join(this.appData, 'Claude Code')
   private readonly portablePath = path.join(this.localData, 'Portable')
   private readonly profilesPath = path.join(this.localData, 'Profiles')
   private readonly portableExe = path.join(this.portablePath, 'Claude.exe')
@@ -206,24 +211,25 @@ export class WindowsAdapter implements PlatformAdapter {
     const target = await this.profile(id)
     if (target.isDefault) throw new Error('Select an isolated instance for SSO.')
     if (!(await missing(this.ssoStatePath))) throw new Error('An SSO session is already in progress. Restore the regular profile first.')
-    if (await missing(this.defaultPath)) throw new Error('The regular Claude profile folder was not found.')
+    const originalProfilePath = await this.primaryProfilePath()
+    if (await missing(originalProfilePath)) throw new Error('The regular Claude profile folder was not found.')
     const [installedVersion, portableVersion] = await Promise.all([this.installedVersion(), this.fileVersion(this.portableExe)])
     if (!this.sameVersion(installedVersion, portableVersion)) throw new Error('Update the portable runtime to match the installed Claude Desktop version before signing in.')
     await this.stopAllClaude()
     await mkdir(this.localData, { recursive: true })
     await mkdir(target.path, { recursive: true })
-    const backup = path.join(this.appData, `Claude.normal-profile-backup-for-${path.basename(target.path)}-${stamp()}`)
-    await rename(this.defaultPath, backup)
+    const backup = path.join(this.appData, `${path.basename(originalProfilePath)}.normal-profile-backup-for-${path.basename(target.path)}-${stamp()}`)
+    await rename(originalProfilePath, backup)
     try {
       // Claude's browser callback is registered to the official MSIX app. A
       // junction can leave that app on a blank code screen, so the selected
       // profile is temporarily moved to the exact path that Claude expects.
-      await rename(target.path, this.defaultPath)
-      await writeFile(this.ssoStatePath, JSON.stringify({ mode: 'swap', profileId: target.id, profileName: target.name, profilePath: target.path, originalProfileBackup: backup, startedAtUtc: new Date().toISOString() }), 'utf8')
+      await rename(target.path, this.claudeProfilePath)
+      await writeFile(this.ssoStatePath, JSON.stringify({ mode: 'swap', profileId: target.id, profileName: target.name, profilePath: target.path, originalProfileBackup: backup, originalProfilePath, startedAtUtc: new Date().toISOString() }), 'utf8')
       await this.startOfficial()
     } catch (error) {
-      if (!(await missing(this.defaultPath)) && (await missing(target.path))) await rename(this.defaultPath, target.path)
-      if ((await missing(this.defaultPath)) && !(await missing(backup))) await rename(backup, this.defaultPath)
+      if (!(await missing(this.claudeProfilePath)) && (await missing(target.path))) await rename(this.claudeProfilePath, target.path)
+      if ((await missing(originalProfilePath)) && !(await missing(backup))) await rename(backup, originalProfilePath)
       await rm(this.ssoStatePath, { force: true })
       throw error
     }
@@ -236,20 +242,23 @@ export class WindowsAdapter implements PlatformAdapter {
 
   async restoreSso(): Promise<void> {
     if (await missing(this.ssoStatePath)) throw new Error('There is no active SSO operation.')
-    const state = JSON.parse(await readFile(this.ssoStatePath, 'utf8')) as { mode?: 'swap', profilePath?: string, originalProfileBackup?: string }
+    const state = JSON.parse(await readFile(this.ssoStatePath, 'utf8')) as { mode?: 'swap', profilePath?: string, originalProfileBackup?: string, originalProfilePath?: string }
     if (!state.originalProfileBackup || !state.profilePath) throw new Error('The saved SSO recovery state is invalid.')
     if (await missing(state.originalProfileBackup)) throw new Error('The regular Claude profile backup is missing.')
+    // Older recovery states did not record the original path and always used
+    // %APPDATA%\\Claude. Only accept the two paths controlled by this adapter.
+    const originalProfilePath = state.originalProfilePath === this.claudeCodeProfilePath ? this.claudeCodeProfilePath : this.claudeProfilePath
     if (await this.anyClaudeRunning()) throw new Error('Quit Claude completely from its tray menu, then click Finish & Restore. This lets Claude save the new sign-in session first.')
     if (state.mode === 'swap') {
-      if (await missing(this.defaultPath)) throw new Error('The temporary Claude profile is missing. Recovery was stopped for safety.')
+      if (await missing(this.claudeProfilePath)) throw new Error('The temporary Claude profile is missing. Recovery was stopped for safety.')
       if (!(await missing(state.profilePath))) throw new Error('The original instance folder already exists. Recovery was stopped for safety.')
-      await rename(this.defaultPath, state.profilePath)
+      await rename(this.claudeProfilePath, state.profilePath)
     } else {
       // Recover sessions created by earlier app versions that used a junction.
-      if (!(await this.isJunction(this.defaultPath))) throw new Error('The regular Claude profile is no longer the temporary SSO link. Recovery was stopped for safety.')
-      await this.removeJunction(this.defaultPath)
+      if (!(await this.isJunction(this.claudeProfilePath))) throw new Error('The regular Claude profile is no longer the temporary SSO link. Recovery was stopped for safety.')
+      await this.removeJunction(this.claudeProfilePath)
     }
-    await rename(state.originalProfileBackup, this.defaultPath)
+    await rename(state.originalProfileBackup, originalProfilePath)
     await rm(this.ssoStatePath, { force: true })
   }
 
@@ -284,7 +293,8 @@ export class WindowsAdapter implements PlatformAdapter {
   }
 
   private async profiles(): Promise<ClaudeProfile[]> {
-    const result: ClaudeProfile[] = [{ id: 'default', name: 'Claude', path: this.defaultPath, isDefault: true, exists: !(await missing(this.defaultPath)), running: false, color: 'default', desktopShortcut: false, startMenuShortcut: false }]
+    const primaryPath = await this.primaryProfilePath()
+    const result: ClaudeProfile[] = [{ id: 'default', name: 'Claude', path: primaryPath, isDefault: true, exists: !(await missing(primaryPath)), running: false, color: 'default', desktopShortcut: false, startMenuShortcut: false }]
     try {
       for (const entry of await readdir(this.profilesPath, { withFileTypes: true })) {
         const legacyMatch = /^Claude-Instance(\d+)$/.exec(entry.name)
@@ -306,6 +316,14 @@ export class WindowsAdapter implements PlatformAdapter {
       const state = JSON.parse(await readFile(this.ssoStatePath, 'utf8')) as { profileId?: unknown, profileName?: unknown }
       return { profileId: typeof state.profileId === 'string' ? state.profileId : undefined, profileName: typeof state.profileName === 'string' ? state.profileName : undefined }
     } catch { return null }
+  }
+
+  private async primaryProfilePath(): Promise<string> {
+    // Prefer the original location if both folders exist. This preserves the
+    // legacy behaviour and leaves the newer Claude Code location untouched.
+    if (!(await missing(this.claudeProfilePath))) return this.claudeProfilePath
+    if (!(await missing(this.claudeCodeProfilePath))) return this.claudeCodeProfilePath
+    return this.claudeProfilePath
   }
 
   private async profile(id: string): Promise<ClaudeProfile> { const found = (await this.profiles()).find(p => p.id === id); if (!found) throw new Error('Profile not found. Refresh the list and try again.'); return found }
