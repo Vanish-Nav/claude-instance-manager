@@ -6,47 +6,72 @@ import {
   CircleAlert,
   CircleCheck,
   CircleHelp,
-  Download,
+  Copy,
+  Eraser,
   FileDown,
   FolderOpen,
   KeyRound,
   Layers,
   LoaderCircle,
   MonitorUp,
-  MoreVertical,
   Pencil,
   Play,
   Plus,
   RefreshCw,
-  RotateCcw,
   Settings,
   Square,
   Trash2,
   X,
 } from "lucide-react";
 import type {
+  BackupTier,
+  ClaudeInstallKind,
+  ClaudeInstallSummary,
   ClaudeProfile,
+  CopyTier,
   CreateProfileOptions,
+  DeepLinkRequest,
+  ImportResult,
+  ImportSelection,
+  ManagerSettings,
   ManagerState,
   ProfileColor,
   StorageItem,
   StorageItemKind,
   StartupSettings,
 } from "../../shared/contracts";
+import { formatStorageSize, message, tierLabels } from "./format";
+import {
+  LegacyRecoveryNotice,
+  PrimaryRunningDialog,
+  SignInHelpDialog,
+  SignInScreen,
+  SignInSidebarBadge,
+} from "./SignInPanel";
+import {
+  BackupTierDialog,
+  CleanCachesDialog,
+  CloneSessionDialog,
+  DeepLinkPickerDialog,
+  ImportProfileDialog,
+  ImportResultDialog,
+  PortableCleanupNotice,
+  type ImportSource,
+  type PendingImport,
+} from "./BackupDialogs";
 
 const empty: ManagerState = {
   platform: "windows",
   installedVersion: null,
-  portableVersion: null,
-  portableReady: false,
-  portablePath: "",
+  install: null,
   profiles: [],
-  pendingSso: false,
-  pendingSsoProfileId: null,
-  pendingSsoProfileName: null,
+  pendingSignIn: false,
+  pendingSignInProfileId: null,
+  pendingSignInProfileName: null,
+  legacySignInRecovery: false,
+  portableCleanup: null,
+  deepLinkRouter: { enabled: false, active: false },
 };
-const sameVersion = (left: string | null, right: string | null) =>
-  Boolean(left && right && left.replace(/(?:\.0)+$/, "") === right.replace(/(?:\.0)+$/, ""));
 type Confirmation = {
   title: string;
   description: ReactNode;
@@ -59,8 +84,11 @@ type Confirmation = {
 };
 type Toast = { message: string; tone: "success" | "danger" };
 type MainView = "instances" | "profile" | "backups" | "archives";
-type ImportSource = StorageItem & { kind: StorageItemKind };
-type PendingImport = { target: ClaudeProfile; source: ImportSource };
+const installKindLabels: Record<ClaudeInstallKind, string> = {
+  "msix-direct": "MSIX",
+  "msix-store": "Microsoft Store",
+  squirrel: "classic installer",
+};
 const profileColorOptions: Array<{ value: ProfileColor; label: string }> = [
   { value: "default", label: "Default" },
   { value: "green", label: "Green" },
@@ -91,7 +119,6 @@ export default function App() {
     [refreshing, setRefreshing] = useState(true),
     [confirmation, setConfirmation] = useState<Confirmation | null>(null),
     [signInHelpOpen, setSignInHelpOpen] = useState(false),
-    [profileMenu, setProfileMenu] = useState<string | null>(null),
     [settingsOpen, setSettingsOpen] = useState(false),
     [settingsSection, setSettingsSection] = useState<"general" | "backups" | "archives">(
       "general",
@@ -121,28 +148,23 @@ export default function App() {
     [importSources, setImportSources] = useState<ImportSource[]>([]),
     [importSourcesLoading, setImportSourcesLoading] = useState(false),
     [pendingImport, setPendingImport] = useState<PendingImport | null>(null),
-    [skipImportBackup, setSkipImportBackup] = useState(false);
-  const openProfileMenu = (id: string) => setProfileMenu(id);
-  const closeProfileMenu = () => setProfileMenu(null);
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.hidden) closeProfileMenu();
-    };
-    window.addEventListener("blur", closeProfileMenu);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      window.removeEventListener("blur", closeProfileMenu);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, []);
-  const refresh = async () => {
-    setRefreshing(true);
+    [skipImportBackup, setSkipImportBackup] = useState(false),
+    [importResult, setImportResult] = useState<ImportResult | null>(null),
+    [backupTarget, setBackupTarget] = useState<ClaudeProfile | null>(null),
+    [cleanTarget, setCleanTarget] = useState<ClaudeProfile | null>(null),
+    [cloneTarget, setCloneTarget] = useState<ClaudeProfile | null>(null),
+    [primaryRunningFor, setPrimaryRunningFor] = useState<ClaudeProfile | null>(null),
+    [deepLinkRequest, setDeepLinkRequest] = useState<DeepLinkRequest | null>(null),
+    [managerSettings, setManagerSettings] = useState<ManagerSettings | null>(null),
+    [routerUpdating, setRouterUpdating] = useState(false);
+  const refresh = async (refreshInstall = false, quiet = false) => {
+    if (!quiet) setRefreshing(true);
     try {
-      setState(await window.manager.state());
+      setState(await window.manager.state(refreshInstall));
     } catch (error) {
       setNotice(message(error));
     } finally {
-      setRefreshing(false);
+      if (!quiet) setRefreshing(false);
     }
   };
   const refreshRunningStates = async () => {
@@ -181,7 +203,11 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
-  useEffect(() => window.manager.onStateChanged(() => void refreshRunningStates()), []);
+  // The main process reports changes it noticed itself (tray actions, a Sign
+  // In that ended because the primary Claude was started): re-read the whole
+  // state without flashing the skeleton.
+  useEffect(() => window.manager.onStateChanged(() => void refresh(false, true)), []);
+  useEffect(() => window.manager.onDeepLinkRequest((request) => setDeepLinkRequest(request)), []);
   const storageKind =
     view === "backups" ? "backup" : view === "archives" ? "archive" : null;
   const loadStorage = async (kind: StorageItemKind) => {
@@ -226,7 +252,7 @@ export default function App() {
     setSkipImportBackup(false);
     setPendingImport({ target, source });
   };
-  const confirmImport = () => {
+  const confirmImport = (selection: ImportSelection) => {
     const pending = pendingImport;
     const createBackup = !skipImportBackup;
     setPendingImport(null);
@@ -241,8 +267,11 @@ export default function App() {
       dangerous: true,
       completionToast: { message: "Profile imported", tone: "success" },
       onCancel: () => setPendingImport(pending),
-      task: () =>
-        window.manager.importStorageItem(pending.target.id, pending.source.kind, pending.source.id, createBackup),
+      task: async () => {
+        const result = await window.manager.importStorageItem(pending.target.id, pending.source.kind, pending.source.id, createBackup, selection);
+        setImportResult(result);
+        return result;
+      },
     });
   };
   const profile =
@@ -273,6 +302,8 @@ export default function App() {
       else await refreshRunningStates();
     } catch (error) {
       setSuccessToast({ message: actionFailureMessage(label, error), tone: "danger" });
+      // A failure often means the dashboard was stale; show the real state.
+      await refresh(false, true);
     } finally {
       setBusy(null);
     }
@@ -293,15 +324,30 @@ export default function App() {
     setSettingsOpen(true);
     setStartup(null);
     setAppVersion(null);
+    setManagerSettings(null);
     try {
-      const [startupState, version] = await Promise.all([
+      const [startupState, version, settings] = await Promise.all([
         window.manager.getStartupSettings(),
         window.manager.getAppVersion(),
+        window.manager.getManagerSettings(),
       ]);
       setStartup(startupState);
       setAppVersion(version);
+      setManagerSettings(settings);
     } catch (error) {
       setNotice(message(error));
+    }
+  };
+  const toggleDeepLinkRouter = async () => {
+    if (!managerSettings) return;
+    setRouterUpdating(true);
+    try {
+      setManagerSettings(await window.manager.setDeepLinkRouter(!managerSettings.deepLinkRouter));
+      await refresh();
+    } catch (error) {
+      setNotice(message(error));
+    } finally {
+      setRouterUpdating(false);
     }
   };
   const toggleStartup = async () => {
@@ -354,7 +400,6 @@ export default function App() {
     setRenameColor(nextProfile.color);
     setRenameDesktopShortcut(nextProfile.desktopShortcut);
     setRenameStartMenuShortcut(nextProfile.startMenuShortcut);
-    setProfileMenu(null);
   };
   const renameSelectedProfile = () => {
     const target = renameProfile;
@@ -410,18 +455,82 @@ export default function App() {
       tone: "success",
     });
   };
-  const canUse = Boolean(state.installedVersion && state.portableReady);
-  const portableRuntimeCurrent = Boolean(
-    state.portableReady &&
-      state.installedVersion &&
-      sameVersion(state.portableVersion, state.installedVersion),
-  );
-  const portableRuntimeRequired = !state.portableReady
-    ? "Prepare the portable runtime first"
-    : "Update the portable runtime to match Claude Desktop first";
-  const canLaunchProfile = (candidate: ClaudeProfile) =>
-    candidate.isDefault ? Boolean(state.installedVersion) : canUse;
+  const canUse = Boolean(state.install);
+  const portableRuntimeRequired = "Install Claude Desktop first";
+  const canLaunchProfile = (_candidate: ClaudeProfile) => canUse;
   const runningProfiles = state.profiles.filter((profile) => profile.running);
+  const primaryProfile = state.profiles.find((item) => item.isDefault) ?? null;
+  const startSignIn = (target: ClaudeProfile, closePrimary: boolean) =>
+    void action(
+      "Starting Sign In",
+      () => window.manager.beginSignIn(target.id, closePrimary),
+      { message: `Sign In started for ${target.name}`, tone: "success" },
+    );
+  const beginSignIn = (target: ClaudeProfile) => {
+    if (primaryProfile?.running) {
+      setPrimaryRunningFor(target);
+      return;
+    }
+    confirmAction({
+      title: `Start Sign In for ${target.name}?`,
+      description:
+        "The manager takes over the primary Claude's single-instance window so the browser callback of the sign-in reaches this instance. The primary Claude stays closed until you finish.",
+      confirmLabel: "Start Sign In",
+      busyLabel: "Starting Sign In",
+      task: () => window.manager.beginSignIn(target.id, false),
+    });
+  };
+  const finishSignIn = () =>
+    confirmAction({
+      title: "Finish Sign In?",
+      description:
+        "The relay stops and the primary Claude can be opened again. Make sure the sign-in inside the instance has completed.",
+      confirmLabel: "Finish Sign In",
+      busyLabel: "Finishing Sign In",
+      completionToast: { message: "Sign In finished", tone: "success" },
+      task: () => window.manager.finishSignIn(),
+    });
+  const confirmBackup = (target: ClaudeProfile, tier: BackupTier) => {
+    setBackupTarget(null);
+    confirmAction({
+      title: tier === "settings" ? `Export settings of ${target.name}?` : `Create ${tierLabels[tier].toLowerCase()} backup for ${target.name}?`,
+      description:
+        tier === "settings"
+          ? "Claude will be closed before the export is created. The export contains no login and no device id."
+          : "Claude will be closed before the backup is created. This may take a little while, depending on the size of the profile. Backups include your Claude sign-in session. Keep them private.",
+      confirmLabel: tier === "settings" ? "Export settings" : "Create backup",
+      busyLabel: tier === "settings" ? "Exporting settings" : "Creating backup",
+      completionToast: { message: tier === "settings" ? "Settings exported" : "Backup created", tone: "success" },
+      task: () => window.manager.backupProfile(target.id, tier),
+    });
+  };
+  const confirmCleanCaches = (target: ClaudeProfile, names: string[]) => {
+    setCleanTarget(null);
+    confirmAction({
+      title: `Delete ${names.length} cache folder${names.length === 1 ? "" : "s"} of ${target.name}?`,
+      description: `${names.join(", ")} will be removed. Claude re-creates them when needed.`,
+      confirmLabel: "Delete caches",
+      busyLabel: "Cleaning caches",
+      dangerous: true,
+      completionToast: { message: "Caches cleaned", tone: "success" },
+      task: () => window.manager.cleanCaches(target.id, names),
+    });
+  };
+  const confirmClone = (target: ClaudeProfile, source: ClaudeProfile, createBackup: boolean, tier: CopyTier, selection: ImportSelection) => {
+    setCloneTarget(null);
+    const what = tier === "settings" ? "settings, MCP servers and session lists" : "login, settings and session lists";
+    confirmAction({
+      title: `Copy ${tier === "settings" ? "settings" : "session"} from ${source.name} into ${target.name}?`,
+      description: createBackup
+        ? `${source.name} and ${target.name} will be closed. The current session of ${target.name} is backed up, then the ${what} of ${source.name} are copied in.`
+        : `${source.name} and ${target.name} will be closed. The ${what} of ${source.name} are copied in without a backup.`,
+      confirmLabel: "Copy",
+      busyLabel: "Copying",
+      dangerous: tier === "session",
+      completionToast: { message: `Copied from ${source.name} into ${target.name}`, tone: "success" },
+      task: () => window.manager.cloneSession(source.id, target.id, createBackup, tier, selection),
+    });
+  };
   const confirmCloseProfile = (target: ClaudeProfile) =>
     confirmAction({
       title: `Close ${target.name}?`,
@@ -465,7 +574,7 @@ export default function App() {
         message: "All Claude instances closed",
         tone: "success",
       },
-      task: () => window.manager.stopAllPortable(),
+      task: () => window.manager.stopAllClaude(),
     });
   const beginArchive = (target: ClaudeProfile) => {
     setArchivePermanently(false);
@@ -510,8 +619,8 @@ export default function App() {
       }),
     [state.profiles],
   );
-  if (state.pendingSso) {
-    const signingInProfile = state.pendingSsoProfileName ?? "selected instance";
+  if (state.pendingSignIn) {
+    const signingInProfileId = state.pendingSignInProfileId;
     return (
       <main className="shell sign-in-mode">
         <aside className="sidebar">
@@ -519,54 +628,17 @@ export default function App() {
             <img className="brand-app-icon" src="./claude-instance-manager.png" alt="" />
             <span className="brand-text">Claude Manager</span>
           </div>
-          <div className="sign-in-sidebar">
-            <KeyRound size={18} />
-            <span>Sign In in progress</span>
-          </div>
+          <SignInSidebarBadge />
         </aside>
-        <section className="content sign-in-content">
-          <div className="sign-in-card">
-            <div className="sign-in-card-heading">
-              <KeyRound size={25} />
-              <span>Sign In</span>
-            </div>
-            <span className="selected-label">SELECTED PROFILE</span>
-            <h1>{signingInProfile}</h1>
-            <p>
-              Complete the email or SSO sign-in in Claude, then quit Claude completely from its tray menu. Until it is finished, other profiles are unavailable to keep their sessions isolated.
-            </p>
-            <p className="sign-in-finish-note">
-              After Claude has closed, finish the process here to keep this session in the selected profile and restore your regular Claude profile.
-            </p>
-            <div className="sign-in-actions">
-              <button
-                className="primary"
-                onClick={() => void action("Opening Claude", () => window.manager.continueSso())}
-                disabled={!!busy}
-              >
-                <Play size={17} />
-                Continue Sign In
-              </button>
-              <button
-                className="sign-in-finish"
-                onClick={() =>
-                  confirmAction({
-                    title: "Finish Sign In and restore the regular profile?",
-                    description:
-                      "First quit Claude completely from its tray menu. Then Finish & Restore will keep the new session in the selected profile and restore your regular Claude profile.",
-                    confirmLabel: "Finish & Restore",
-                    busyLabel: "Finishing Sign In",
-                    task: () => window.manager.restoreSso(),
-                  })
-                }
-                disabled={!!busy}
-              >
-                <RotateCcw size={16} />
-                Finish Sign In & Restore
-              </button>
-            </div>
-          </div>
-        </section>
+        <SignInScreen
+          state={state}
+          busy={!!busy}
+          onOpenInstance={() => {
+            if (signingInProfileId)
+              void action("Opening Claude", () => window.manager.startProfile(signingInProfileId), undefined, false);
+          }}
+          onFinish={finishSignIn}
+        />
         <BusyOverlay label={busy} />
         <SuccessToast toast={successToast} onClose={() => setSuccessToast(null)} />
         <ConfirmDialog
@@ -589,7 +661,6 @@ export default function App() {
             className="instances-heading"
             onClick={() => {
               setView("instances");
-              setProfileMenu(null);
             }}
           >
             <Layers size={17} />
@@ -628,7 +699,6 @@ export default function App() {
                 onClick={() => {
                   setSelected(item.id);
                   setView("profile");
-                  setProfileMenu(null);
                 }}
               >
                 <span className={`sidebar-profile-mark ${item.color}`}>
@@ -651,7 +721,6 @@ export default function App() {
                   aria-label={`Edit ${item.name}`}
                   onClick={(event) => {
                     event.stopPropagation();
-                    setProfileMenu(null);
                     openRenameProfile(item);
                   }}
                   disabled={!!busy || refreshing}
@@ -676,7 +745,6 @@ export default function App() {
                 aria-label={`${item.running ? "Open" : "Launch"} ${item.name}`}
                 onClick={(event) => {
                   event.stopPropagation();
-                  setProfileMenu(null);
                   void action(item.running ? "Opening Claude" : "Launching Claude", () =>
                     window.manager.startProfile(item.id),
                     undefined,
@@ -687,39 +755,18 @@ export default function App() {
               >
                 <Play size={13} fill="currentColor" />
               </button>
-              <div
-                className="sidebar-profile-actions"
-                onMouseEnter={() => {
-                  if (item.running && !busy && !refreshing) openProfileMenu(item.id);
+              <button
+                className="sidebar-profile-stop"
+                data-tooltip={item.running ? "Close" : undefined}
+                aria-label={`Close ${item.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  confirmCloseProfile(item);
                 }}
-                onMouseLeave={closeProfileMenu}
+                disabled={!item.running || !!busy || refreshing}
               >
-                <span
-                  className={`sidebar-profile-menu ${item.running ? "" : "disabled"} ${profileMenu === item.id ? "active" : ""}`}
-                  aria-hidden="true"
-                >
-                  <MoreVertical size={15} />
-                </span>
-                {profileMenu === item.id && item.running && (
-                  <div className="sidebar-context-bridge" aria-hidden="true" />
-                )}
-                {profileMenu === item.id && item.running && (
-                  <div
-                    className="sidebar-context"
-                    onMouseEnter={() => openProfileMenu(item.id)}
-                  >
-                    <button
-                      onClick={() => {
-                        setProfileMenu(null);
-                        confirmCloseProfile(item);
-                      }}
-                    >
-                      <Square size={14} />
-                      Close
-                    </button>
-                  </div>
-                )}
-              </div>
+                <Square size={11} fill="currentColor" />
+              </button>
             </div>
           ))}
         </div>
@@ -728,8 +775,8 @@ export default function App() {
           className={`nav storage-nav ${view === "backups" ? "active" : ""}`}
           onClick={() => {
             setView("backups");
-            setProfileMenu(null);
           }}
+          disabled={refreshing}
         >
           <Archive size={16} />
           <span className="nav-label">Backups</span>
@@ -738,32 +785,23 @@ export default function App() {
           className={`nav storage-nav ${view === "archives" ? "active" : ""}`}
           onClick={() => {
             setView("archives");
-            setProfileMenu(null);
           }}
+          disabled={refreshing}
         >
           <FolderOpen size={16} />
           <span className="nav-label">Archives</span>
         </button>
-        {state.pendingSso && (
-          <button
-            className="sidebar-restore"
-            data-tooltip="Restore regular profile"
-            onClick={() =>
-              confirmAction({
-                title: "Restore the regular profile?",
-                description:
-                  "Claude will be closed and the normal profile will be returned to its original location.",
-                confirmLabel: "Restore profile",
-                busyLabel: "Restoring regular profile",
-                task: () => window.manager.restoreSso(),
-              })
-            }
-            disabled={!!busy || refreshing}
-          >
-            <RotateCcw size={14} />
-            <span className="sidebar-restore-label">Restore profile</span>
-          </button>
-        )}
+        <button className={`sidebar-status ${state.install ? "" : "warn"}`} onClick={() => void openSettings()} disabled={refreshing}>
+          <i />
+          <span>
+            <strong>{state.install ? "Claude Desktop" : "Claude Desktop not found"}</strong>
+            <small>
+              {state.install
+                ? `${state.installedVersion ? `v${state.installedVersion}` : ""} · ${installKindLabels[state.install.kind]}${state.install.candidates > 1 ? ` · ${state.install.candidates} installs` : ""}${state.deepLinkRouter.enabled ? ` · router ${state.deepLinkRouter.active ? "on" : "idle"}` : ""}`
+                : "Install and launch it, then re-detect"}
+            </small>
+          </span>
+        </button>
         <div className="sidebar-footer">
           <button
             className="nav settings-nav-trigger"
@@ -803,46 +841,12 @@ export default function App() {
             <div className="header-actions">
               <button
                 className="secondary"
-                onClick={() => void refresh()}
+                data-tooltip="Re-detect the Claude installation and refresh the list"
+                onClick={() => void refresh(true)}
                 disabled={!!busy || refreshing}
               >
                 <RefreshCw className={refreshing ? "spin" : ""} size={16} />
                 {refreshing ? "Refreshing" : "Refresh"}
-              </button>
-              <button
-                className="secondary"
-                data-tooltip={!state.portableReady ? portableRuntimeRequired : undefined}
-                onClick={() =>
-                  confirmAction({
-                    title: "Update portable runtime?",
-                    description:
-                      "Quit every Claude instance from its tray menu first. The update will start only after Claude has fully closed.",
-                    confirmLabel: "Update runtime",
-                    busyLabel: "Updating portable runtime",
-                    dangerous: true,
-                    completionToast: {
-                      message: "Portable runtime updated",
-                      tone: "success",
-                    },
-                    task: () => window.manager.updatePortable(),
-                  })
-                }
-                disabled={!canUse || !!busy || refreshing}
-              >
-                <Download size={16} />
-                Update runtime
-              </button>
-              <button
-                className="secondary"
-                onClick={confirmCloseAll}
-                disabled={
-                  !state.profiles.some((profile) => profile.running) ||
-                  !!busy ||
-                  refreshing
-                }
-              >
-                <Square size={15} />
-                Close all
               </button>
             </div>
           )}
@@ -856,33 +860,21 @@ export default function App() {
             </button>
           </div>
         )}
-        {state.pendingSso && (
-          <div className="sso-notice">
-            <KeyRound size={18} />
-            <div>
-              <strong>Sign-in in progress</strong>
-              <span>
-                Finish the sign-in in Claude. When it is complete, restore the regular Claude profile.
-              </span>
-            </div>
-            <button
-              className="secondary"
-              onClick={() =>
-                confirmAction({
-                  title: "Restore the regular profile?",
-                  description:
-                    "Claude will be closed and the normal profile will be returned to its original location.",
-                  confirmLabel: "Restore profile",
-                  busyLabel: "Restoring regular profile",
-                  task: () => window.manager.restoreSso(),
-                })
-              }
-              disabled={!!busy || refreshing}
-            >
-              <RotateCcw size={15} />
-              Restore profile
-            </button>
-          </div>
+        {state.legacySignInRecovery && !storageKind && (
+          <LegacyRecoveryNotice
+            busy={!!busy || refreshing}
+            onRestore={() =>
+              confirmAction({
+                title: "Finish the legacy Sign In and restore the regular profile?",
+                description:
+                  "Quit every Claude first. The signed-in data returns to the selected instance and the regular Claude profile is moved back to its original location.",
+                confirmLabel: "Finish & Restore",
+                busyLabel: "Restoring regular profile",
+                completionToast: { message: "Regular profile restored", tone: "success" },
+                task: () => window.manager.restoreSso(),
+              })
+            }
+          />
         )}
         {storageKind && (
           <div className="storage-sensitive-notice">
@@ -922,70 +914,31 @@ export default function App() {
         ) : (
           <>
             <>
-              {!state.installedVersion && (
+              {!state.install && (
                 <div className="setup">
                   <MonitorUp size={21} />
                   <div>
                     <strong>Claude Desktop is not available</strong>
                     <p>
-                      Install and launch the official Claude Desktop app, then
-                      refresh this page.
+                      Install the official Claude Desktop app (MSIX, Microsoft Store or the classic installer),
+                      launch it once, then refresh this page.
                     </p>
                   </div>
                 </div>
               )}
-              {state.installedVersion && !state.portableReady && (
-                <div className="setup">
-                  <MonitorUp size={21} />
-                  <div>
-                    <strong>Prepare the portable app</strong>
-                    <p>
-                      One elevated copy is used to run every isolated Windows
-                      profile.
-                    </p>
-                  </div>
-                  <button
-                    className="primary"
-                    onClick={() =>
-                      void action("Preparing portable Claude", () =>
-                        window.manager.preparePortable(),
-                      )
-                    }
-                    disabled={!!busy}
-                  >
-                    Prepare portable
-                  </button>
-                </div>
-              )}
+              <PortableCleanupNotice
+                cleanup={state.portableCleanup}
+                busy={!!busy}
+                onRemove={() =>
+                  void action(
+                    "Removing portable copy",
+                    () => window.manager.removePortableRuntime(),
+                    { message: "Portable copy removed", tone: "success" },
+                  )
+                }
+                onDismiss={() => void action("Keeping portable copy", () => window.manager.dismissPortableCleanup())}
+              />
             </>
-            <div className="overview">
-              <div>
-                <span>Official Claude</span>
-                <strong>
-                  {state.installedVersion
-                    ? `v${state.installedVersion}`
-                    : "Not installed"}
-                </strong>
-              </div>
-              <div>
-                <span>Portable runtime</span>
-                <strong>
-                  {state.portableVersion
-                    ? `v${state.portableVersion}`
-                    : "Not prepared"}
-                </strong>
-              </div>
-              <div>
-                <span>Isolation</span>
-                <strong>
-                  {state.pendingSso
-                    ? "SSO recovery required"
-                    : canUse
-                      ? "Ready"
-                      : "Setup required"}
-                </strong>
-              </div>
-            </div>
             {view === "instances" && (
               <div className="instances-create-row">
                 <button
@@ -995,6 +948,14 @@ export default function App() {
                 >
                   <Plus size={17} />
                   New instance
+                </button>
+                <button
+                  className="secondary"
+                  onClick={confirmCloseAll}
+                  disabled={!state.profiles.some((item) => item.running) || !!busy || refreshing}
+                >
+                  <Square size={15} />
+                  Close all
                 </button>
               </div>
             )}
@@ -1050,22 +1011,17 @@ export default function App() {
                     </button>
                   )}
                 </h1>
-                <footer className="profile-footer">
-                  <div className="profile-footer-top">
-                    <div>
-                      <code>{profile.path}</code>
-                      <span
-                        className={`state ${profile.exists ? (profile.running ? "running" : "stopped") : "missing"}`}
-                      >
+                <div className="profile-panels">
+                  <section className="panel wide">
+                    <div className="panel-head">
+                      <h3>Instance</h3>
+                      <span className={`state ${profile.exists ? (profile.running ? "running" : "stopped") : "missing"}`}>
                         <i />
-                        {profile.exists
-                          ? profile.running
-                            ? "Running"
-                            : "Stopped"
-                          : "Folder missing"}
+                        {profile.exists ? (profile.running ? "Running" : "Stopped") : "Folder missing"}
                       </span>
                     </div>
-                    <div className="profile-run-actions">
+                    <code className="panel-path">{profile.path}</code>
+                    <div className="panel-actions">
                       <button
                         className="profile-primary-action"
                         data-tooltip={!profile.running && !canLaunchProfile(profile) ? portableRuntimeRequired : undefined}
@@ -1082,40 +1038,22 @@ export default function App() {
                         {profile.running ? "Open" : "Launch"}
                       </button>
                       {profile.running && (
-                        <button
-                          className="profile-stop-button"
-                          data-tooltip="Close"
-                          aria-label="Close"
-                          onClick={() => confirmCloseProfile(profile)}
-                          disabled={!!busy}
-                        >
+                        <button className="secondary" onClick={() => confirmCloseProfile(profile)} disabled={!!busy}>
                           <Square size={14} />
+                          Close
                         </button>
                       )}
                     </div>
-                  </div>
-                  <div className="profile-footer-bottom">
                     {!profile.isDefault && (
-                      <div className="profile-sign-in-actions">
-                        <button
-                          className="profile-sign-in-action"
-                          data-tooltip={!portableRuntimeCurrent ? portableRuntimeRequired : undefined}
-                          onClick={() =>
-                            confirmAction({
-                              title: `Start SignIn for ${profile.name}?`,
-                              description:
-                                "All Claude processes will be closed. The official Claude app opens for sign-in, then use Finish Sign In & Restore to return the regular profile.",
-                              confirmLabel: "Start SignIn",
-                              busyLabel: "Starting sign-in",
-                              dangerous: true,
-                              task: () => window.manager.beginSso(profile.id),
-                            })
-                          }
-                          disabled={!!busy || state.pendingSso || !portableRuntimeCurrent}
-                        >
-                          <KeyRound size={16} />
-                          Start SignIn
-                        </button>
+                      <p className="panel-hint">
+                        To keep this instance on the taskbar, pin its running window, or add a Start menu shortcut in Edit and pin that.
+                      </p>
+                    )}
+                  </section>
+                  {!profile.isDefault && (
+                    <section className="panel">
+                      <div className="panel-head">
+                        <h3>Account</h3>
                         <button
                           className="sign-in-help-button"
                           data-tooltip="How Sign In works"
@@ -1125,50 +1063,91 @@ export default function App() {
                           <CircleHelp size={17} />
                         </button>
                       </div>
-                    )}
-                    <div className="profile-data-actions">
-                  <button
-                    className="secondary"
-                    onClick={() =>
-                      confirmAction({
-                        title: `Create backup for ${profile.name}?`,
-                        description:
-                          "Claude will be closed before the backup is created. This may take a little while, depending on the size of the profile. Backups include your Claude sign-in session. Keep them private.",
-                        confirmLabel: "Create backup",
-                        busyLabel: "Creating backup",
-                        completionToast: { message: "Backup created", tone: "success" },
-                        task: () => window.manager.backupProfile(profile.id),
-                      })
-                    }
-                    disabled={!!busy || !profile.exists}
-                  >
-                    <Archive size={16} />
-                    Backup
-                  </button>
-                  {!profile.isDefault && (
-                    <>
+                      <p className="panel-text">
+                        Always start here: signing in from inside the window without it opens the primary Claude
+                        instead. The manager redirects the browser callback to this instance and keeps the primary
+                        Claude closed until you finish.
+                      </p>
+                      <div className="panel-actions">
+                        <button
+                          className="profile-sign-in-action"
+                          data-tooltip={!canUse ? portableRuntimeRequired : state.legacySignInRecovery ? "Finish the legacy Sign In recovery first" : undefined}
+                          onClick={() => beginSignIn(profile)}
+                          disabled={!!busy || state.pendingSignIn || state.legacySignInRecovery || !canUse}
+                        >
+                          <KeyRound size={16} />
+                          Start Sign In
+                        </button>
+                      </div>
+                    </section>
+                  )}
+                  <section className={`panel ${profile.isDefault ? "wide" : ""}`}>
+                    <div className="panel-head">
+                      <h3>Data</h3>
+                    </div>
+                    <p className="panel-text">
+                      {profile.isDefault
+                        ? "Back up the primary profile, or export its settings without the login for another machine or instance."
+                        : "Backups, imports and copies from another instance. Caches can be cleaned while the instance is closed."}
+                    </p>
+                    <div className="panel-actions">
                       <button
                         className="secondary"
-                        data-tooltip="Import a backup or archived profile"
-                        onClick={() => void openImportSources(profile)}
+                        data-tooltip="Back up the session or the whole profile, or export settings"
+                        onClick={() => setBackupTarget(profile)}
                         disabled={!!busy || !profile.exists}
                       >
-                        <FileDown size={16} />
-                        Import
-                      </button>
-                      <button
-                        className="danger"
-                        onClick={() => beginArchive(profile)}
-                        disabled={!!busy}
-                      >
                         <Archive size={16} />
-                        Archive
+                        Backup
                       </button>
-                    </>
-                  )}
+                      {!profile.isDefault && (
+                        <>
+                          <button
+                            className="secondary"
+                            data-tooltip="Import a backup, export or archived profile"
+                            onClick={() => void openImportSources(profile)}
+                            disabled={!!busy || !profile.exists}
+                          >
+                            <FileDown size={16} />
+                            Import
+                          </button>
+                          <button
+                            className="secondary"
+                            data-tooltip="Copy settings, or the whole session, from another instance"
+                            onClick={() => setCloneTarget(profile)}
+                            disabled={!!busy || !profile.exists}
+                          >
+                            <Copy size={16} />
+                            Copy from…
+                          </button>
+                        </>
+                      )}
+                      <button
+                        className="secondary"
+                        data-tooltip={profile.running ? "Close the instance to clean its caches" : "Delete re-downloadable caches"}
+                        onClick={() => setCleanTarget(profile)}
+                        disabled={!!busy || !profile.exists || profile.running}
+                      >
+                        <Eraser size={16} />
+                        Clean caches
+                      </button>
                     </div>
-                  </div>
-                </footer>
+                  </section>
+                  {!profile.isDefault && (
+                    <section className="panel wide danger-panel">
+                      <div className="panel-head">
+                        <h3>Archive</h3>
+                      </div>
+                      <div className="panel-actions panel-actions-row">
+                        <p className="panel-text">Move this instance to Archives to import it again later, or delete it for good.</p>
+                        <button className="danger" onClick={() => beginArchive(profile)} disabled={!!busy}>
+                          <Archive size={16} />
+                          Archive instance
+                        </button>
+                      </div>
+                    </section>
+                  )}
+                </div>
               </section>
             )}
           </>
@@ -1238,6 +1217,13 @@ export default function App() {
         startup={startup}
         version={appVersion}
         updating={startupUpdating}
+        managerSettings={managerSettings}
+        routerUpdating={routerUpdating}
+        install={state.install}
+        onRedetect={() => {
+          setSettingsOpen(false);
+          void refresh(true);
+        }}
         onClose={() => setSettingsOpen(false)}
         onSectionChange={setSettingsSection}
         onOpenBackups={() =>
@@ -1247,10 +1233,57 @@ export default function App() {
           void action("Opening archives", () => window.manager.openArchives())
         }
         onToggle={() => void toggleStartup()}
+        onToggleRouter={() => void toggleDeepLinkRouter()}
       />
       <SignInHelpDialog
         open={signInHelpOpen}
         onClose={() => setSignInHelpOpen(false)}
+      />
+      <PrimaryRunningDialog
+        profileName={primaryRunningFor?.name ?? null}
+        onCancel={() => setPrimaryRunningFor(null)}
+        onCloseAndContinue={() => {
+          const target = primaryRunningFor;
+          setPrimaryRunningFor(null);
+          if (target) startSignIn(target, true);
+        }}
+      />
+      <BackupTierDialog
+        profile={backupTarget}
+        onClose={() => setBackupTarget(null)}
+        onConfirm={(tier) => {
+          if (backupTarget) confirmBackup(backupTarget, tier);
+        }}
+      />
+      <CleanCachesDialog
+        profile={cleanTarget}
+        onClose={() => setCleanTarget(null)}
+        onConfirm={(names) => {
+          if (cleanTarget) confirmCleanCaches(cleanTarget, names);
+        }}
+      />
+      <CloneSessionDialog
+        target={cloneTarget}
+        sources={state.profiles.filter((item) => item.id !== cloneTarget?.id && item.exists)}
+        onClose={() => setCloneTarget(null)}
+        onConfirm={(source, createBackup, tier, selection) => {
+          if (cloneTarget) confirmClone(cloneTarget, source, createBackup, tier, selection);
+        }}
+      />
+      <ImportResultDialog result={importResult} onClose={() => setImportResult(null)} />
+      <DeepLinkPickerDialog
+        request={deepLinkRequest}
+        onDismiss={() => {
+          const request = deepLinkRequest;
+          setDeepLinkRequest(null);
+          if (request) void window.manager.resolveDeepLink(request.url, null);
+        }}
+        onPick={(target) => {
+          const request = deepLinkRequest;
+          setDeepLinkRequest(null);
+          if (request)
+            void action(`Opening link in ${target.name}`, () => window.manager.resolveDeepLink(request.url, target.id), undefined, false);
+        }}
       />
       <TooltipLayer />
     </main>
@@ -1290,7 +1323,7 @@ function StoragePanel({
                 <div>
                   <strong>{new Date(item.createdAt).toLocaleString()}</strong>
                   <span>
-                    {kind === "backup" ? "Profile backup" : "Archived profile"} · {formatStorageSize(item.sizeBytes)}
+                    {tierLabels[item.tier]} · {formatStorageSize(item.sizeBytes)}
                   </span>
                 </div>
                 <button className="danger" onClick={() => onDelete(item)}>
@@ -1304,18 +1337,6 @@ function StoragePanel({
       )}
     </section>
   );
-}
-function formatStorageSize(sizeBytes: number | null) {
-  if (sizeBytes === null) return "Size unavailable";
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = sizeBytes / 1024;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 function ProfileCard({
   profile,
@@ -1478,23 +1499,6 @@ function SuccessToast({ toast, onClose }: { toast: Toast | null; onClose(): void
     </div>
   ) : null;
 }
-function SignInHelpDialog({ open, onClose }: { open: boolean; onClose(): void }) {
-  return open ? (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal sign-in-help-modal" role="dialog" aria-modal="true" aria-labelledby="sign-in-help-title">
-        <div className="modal-icon"><KeyRound size={22} /></div>
-        <h2 id="sign-in-help-title">How Sign In works</h2>
-        <ol>
-          <li>Choose the instance you want to sign in to, then click <strong>Start SignIn</strong>.</li>
-          <li>All Claude windows close. The regular Claude app opens temporarily for email, code, or SSO sign-in.</li>
-          <li>Finish the sign-in in Claude, then choose <strong>Quit</strong> from Claude’s tray menu.</li>
-          <li>Return here and click <strong>Finish Sign In & Restore</strong>. The new session stays in the selected instance and your regular Claude profile is restored.</li>
-        </ol>
-        <div className="modal-actions"><button className="primary" onClick={onClose}>Got it</button></div>
-      </section>
-    </div>
-  ) : null;
-}
 function ConfirmDialog({
   confirmation,
   onCancel,
@@ -1580,60 +1584,6 @@ function ArchiveProfileDialog({
           </button>
           <button className={permanently ? "danger" : "primary"} onClick={onConfirm}>
             {permanently ? "Delete permanently" : "Archive instance"}
-          </button>
-        </div>
-      </section>
-    </div>
-  ) : null;
-}
-function ImportProfileDialog({
-  pending,
-  skipBackup,
-  onSkipBackupChange,
-  onClose,
-  onConfirm,
-}: {
-  pending: PendingImport | null;
-  skipBackup: boolean;
-  onSkipBackupChange(value: boolean): void;
-  onClose(): void;
-  onConfirm(): void;
-}) {
-  return pending ? (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="import-profile-title"
-      >
-        <div className="modal-icon">
-          <FileDown size={22} />
-        </div>
-        <h2 id="import-profile-title">Import into {pending.target.name}?</h2>
-        <p>
-          Data will be imported from the selected {pending.source.kind} of
-          <strong> {pending.source.profileName}</strong>.
-        </p>
-        <label className="checkbox-row import-skip-backup-option">
-          <input
-            type="checkbox"
-            checked={skipBackup}
-            onChange={(event) => onSkipBackupChange(event.target.checked)}
-          />
-          <span>Skip automatic backup</span>
-        </label>
-        <p className="import-skip-backup-warning import-skip-backup-warning-slot">
-          {skipBackup
-            ? `Current data in ${pending.target.name} will be replaced without a backup.`
-            : "\u00A0"}
-        </p>
-        <div className="modal-actions">
-          <button className="secondary" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="primary" onClick={onConfirm}>
-            Continue
           </button>
         </div>
       </section>
@@ -1905,22 +1855,32 @@ function SettingsDialog({
   startup,
   version,
   updating,
+  managerSettings,
+  routerUpdating,
+  install,
   onClose,
   onSectionChange,
   onOpenBackups,
   onOpenArchives,
   onToggle,
+  onToggleRouter,
+  onRedetect,
 }: {
   open: boolean;
   section: "general" | "backups" | "archives";
   startup: StartupSettings | null;
   version: string | null;
   updating: boolean;
+  managerSettings: ManagerSettings | null;
+  routerUpdating: boolean;
+  install: ClaudeInstallSummary | null;
   onClose(): void;
   onSectionChange(section: "general" | "backups" | "archives"): void;
   onOpenBackups(): void;
   onOpenArchives(): void;
   onToggle(): void;
+  onToggleRouter(): void;
+  onRedetect(): void;
 }) {
   return open ? (
     <div className="modal-backdrop settings-backdrop" role="presentation">
@@ -1972,6 +1932,26 @@ function SettingsDialog({
                 </div>
               </div>
               <div className="settings-row">
+                <div className="settings-install">
+                  <h3>Claude Desktop</h3>
+                  {install ? (
+                    <>
+                      <p>
+                        {install.version ? `v${install.version}` : "Unknown version"} · {install.label}
+                        {install.candidates > 1 && ` · ${install.candidates} installations found, this one is used`}
+                      </p>
+                      <code>Launched through {install.launchTarget}</code>
+                    </>
+                  ) : (
+                    <p>Not found. Install Claude Desktop, launch it once, then re-detect.</p>
+                  )}
+                </div>
+                <button className="secondary" onClick={onRedetect}>
+                  <RefreshCw size={15} />
+                  Re-detect
+                </button>
+              </div>
+              <div className="settings-row">
                 <div>
                   <h3>Launch at Login</h3>
                   {startup && !startup.supported && (
@@ -1991,6 +1971,27 @@ function SettingsDialog({
                   <i />
                 </button>
               </div>
+              <div className="settings-row">
+                <div>
+                  <h3>Deep-link router (experimental)</h3>
+                  <p>
+                    While the primary Claude is closed, <code>claude://</code> links open in the instance you used last,
+                    or you are asked which one. Works only while the manager runs.
+                  </p>
+                  {managerSettings?.deepLinkRouter && !startup?.enabled && (
+                    <p className="setting-disabled-note">Launch at Login is off: the router only works while the manager runs.</p>
+                  )}
+                </div>
+                <button
+                  className={`switch ${managerSettings?.deepLinkRouter ? "on" : ""}`}
+                  aria-label="Deep-link router"
+                  aria-pressed={managerSettings?.deepLinkRouter ?? false}
+                  onClick={onToggleRouter}
+                  disabled={!managerSettings || routerUpdating}
+                >
+                  <i />
+                </button>
+              </div>
             </>
           ) : section === "backups" ? (
             <>
@@ -2000,7 +2001,8 @@ function SettingsDialog({
                 <div>
                   <h3>Profile backups</h3>
                   <p>
-                    Open the folder containing profile backups.
+                    Open the folder containing profile backups and settings exports. Session and full backups
+                    contain an active login; settings exports do not.
                   </p>
                 </div>
                 <button className="secondary" onClick={onOpenBackups}>
@@ -2041,14 +2043,9 @@ function DashboardSkeleton() {
     </div>
   );
 }
-function message(error: unknown) {
-  return error instanceof Error
-    ? error.message
-    : "An unexpected error occurred.";
-}
 function actionFailureMessage(label: string, error: unknown) {
-  const detail = message(error).replace(/^Error invoking remote method '[^']+': /, "");
-  if (/\bEBUSY\b|resource busy|locked/i.test(detail))
-    return "Backup failed because Claude files are still in use. Please try again.";
+  const detail = message(error);
+  if (/\bEBUSY\b|\bEPERM\b|resource busy|locked/i.test(detail))
+    return `${label} failed: Claude files are still in use. Close the instance and try again. (${detail})`;
   return `${label} failed: ${detail}`;
 }

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A console runner instead of a test framework: it needs no NuGet package,
+       so it runs on a machine whose package source is unavailable. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../RelayPayload.cs" Link="RelayPayload.cs" />
+  </ItemGroup>
+</Project>

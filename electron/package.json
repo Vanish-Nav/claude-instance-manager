@@ -1,6 +1,6 @@
 {
   "name": "claude-instance-manager-desktop",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "A cross-platform manager for isolated Claude Desktop profiles.",
   "main": "./out/main/index.js",
   "scripts": {
@@ -8,6 +8,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "node --test tests/*.test.cjs && npm run test:helper",
+    "test:helper": "dotnet run --project taskbar-helper/tests/RelayPayloadTests.csproj -c Debug --ignore-failed-sources",
     "build:taskbar-helper": "dotnet publish taskbar-helper/TaskbarHelper.csproj -c Release -r win-x64 --ignore-failed-sources",
     "package:win": "npm run build:taskbar-helper && npm run build && electron-builder --win --x64",
     "package:portable": "npm run build:taskbar-helper && npm run build && electron-builder --win portable --x64",
