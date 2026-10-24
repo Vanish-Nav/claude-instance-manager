@@ -9,7 +9,7 @@ Windows desktop app for running isolated Claude Desktop profiles. The applicatio
 > This is an unofficial community tool and is not affiliated with Anthropic.
 
 <p align="center">
-  <img src="Assets/screenshots/instances-overview.png" alt="Claude Instance Manager instances overview" width="960">
+  <img src="Assets/screenshots/instances-overview-1.1.png" alt="Claude Instance Manager instances overview" width="960">
 </p>
 
 ## Support the project
@@ -40,13 +40,13 @@ Please send USDT only through the TRC-20 network. Transfers sent over another ne
 Each instance runs independently and receives a taskbar icon based on its selected colour. Pin the running window, or the Start menu shortcut, and the pinned button launches that instance.
 
 <p align="center">
-  <img src="Assets/screenshots/instance-taskbar-icons.png" alt="Colour-coded taskbar icons for independent Claude instances" width="180">
+  <img src="Assets/screenshots/instance-taskbar-icons-1.1.png" alt="Colour-coded taskbar icons for independent Claude instances" width="180">
 </p>
 
 Create a profile with a name, colour, and optional Desktop or Start menu shortcuts.
 
 <p align="center">
-  <img src="Assets/screenshots/create-instance.png" alt="Create an isolated Claude instance" width="760">
+  <img src="Assets/screenshots/create-instance-1.1.png" alt="Create an isolated Claude instance" width="760">
 </p>
 
 ## Requirements
