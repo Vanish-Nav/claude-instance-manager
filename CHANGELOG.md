@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1
+
+### Fixed
+- Renaming or recolouring an instance updates the icon and description of its taskbar pins (the pin label follows only after re-pinning).
+- Shortcuts and taskbar pins created by a manager at another location (for example an unpacked build) are repointed at the installed manager on its first start; helpers with a stale relaunch command are restarted. Development builds never claim them.
+- `Remove copy` of the old portable runtime no longer hangs on `app.asar`: the manager itself kept the archive open through Electron's asar support, which is now disabled in the main process.
+- Minor dependency updates (React 19.3.1, Electron 43.8.3, electron-builder 26.18, lucide-react 1.61).
+
 ## 1.1.0
 
 ### Changed

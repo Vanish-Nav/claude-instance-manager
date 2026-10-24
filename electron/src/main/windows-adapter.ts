@@ -124,6 +124,7 @@ export class WindowsAdapter implements PlatformAdapter {
     if (processId) {
       await this.restartTaskbarHelper(renamed, processId)
     }
+    await this.refreshPinnedShortcuts(renamed)
     return renamed
   }
 
@@ -145,6 +146,7 @@ export class WindowsAdapter implements PlatformAdapter {
       await delay(900)
       await this.startProfile(profile.id)
     }
+    await this.refreshPinnedShortcuts({ ...profile, color })
     return { ...profile, color }
   }
 
@@ -932,12 +934,20 @@ export class WindowsAdapter implements PlatformAdapter {
     }
     for (const profile of running) {
       const known = this.taskbarHelpers.get(profile.id)
-      if ((known && known.exitCode === null && !known.killed) || helpers.includes(this.profileAppUserModelId(profile))) {
+      if (known && known.exitCode === null && !known.killed) {
         continue
       }
       const processId = this.profileProcesses(profile, processes, install)[0]?.processId
-      if (processId) {
+      if (!processId) {
+        continue
+      }
+      const existing = helpers.split(/\r?\n/).find(line => line.includes(this.profileAppUserModelId(profile)))
+      if (!existing) {
         await this.applyTaskbarIdentity(profile, processId)
+      } else if (!existing.toLowerCase().includes(process.execPath.toLowerCase()) && !this.isDevelopmentBuild()) {
+        // A helper started by a manager at another location would keep a
+        // stale relaunch command on the window; a pin made now must use this one.
+        await this.restartTaskbarHelper(profile, processId)
       }
     }
   }
@@ -1227,14 +1237,18 @@ export class WindowsAdapter implements PlatformAdapter {
     }
     this.shortcutsMigrated = true
     const portableExe = path.join(this.portablePath, 'Claude.exe').toLowerCase()
-    for (const directory of this.shortcutRemovalDirectories()) {
-      for (const shortcut of await this.readShortcuts(directory.path)) {
+    for (const directory of [...this.shortcutRemovalDirectories().map(item => item.path), ...(await this.pinnedShortcutDirectories())]) {
+      for (const shortcut of await this.readShortcuts(directory)) {
         const args = shortcut.details.args?.replaceAll('"', '') ?? ''
-        const profile = profiles.find(candidate => !candidate.isDefault && args.includes(`--user-data-dir=${candidate.path}`))
+        const profile = profiles.find(candidate => !candidate.isDefault && (args.includes(`--user-data-dir=${candidate.path}`) || args.includes(`--launch-profile=${candidate.id}`)))
         try {
-          if (profile) {
+          if (profile && args.includes('--user-data-dir=')) {
             // A direct launch (portable copy or alias) gets no taskbar identity.
             shell.writeShortcutLink(shortcut.path, 'replace', this.shortcutDetails(profile, install))
+          } else if (profile && this.isForeignManager(shortcut.details.target)) {
+            // A shortcut or pin created by a manager at another location (an
+            // unpacked build, an older install) keeps working through this one.
+            shell.writeShortcutLink(shortcut.path, 'update', { target: process.execPath, icon: this.profileIconPath(profile.color, install), iconIndex: 0 })
           } else if (shortcut.details.target?.toLowerCase() === portableExe) {
             const iconWasPortable = !shortcut.details.icon || shortcut.details.icon.toLowerCase() === portableExe
             shell.writeShortcutLink(shortcut.path, 'update', { target: install.launchTarget, ...(iconWasPortable ? { icon: install.iconSource, iconIndex: 0 } : {}) })
@@ -1242,6 +1256,55 @@ export class WindowsAdapter implements PlatformAdapter {
         } catch { /* A read-only or foreign shortcut stays as it is. */ }
       }
     }
+  }
+
+  /** Another manager executable than this one; never claimed by an unpacked development build. */
+  private isForeignManager(target: string | undefined): boolean {
+    if (!target || this.isDevelopmentBuild()) {
+      return false
+    }
+    return path.basename(target).toLowerCase() === path.basename(process.execPath).toLowerCase() && target.toLowerCase() !== process.execPath.toLowerCase()
+  }
+
+  private isDevelopmentBuild(): boolean {
+    return process.execPath.toLowerCase().includes(`${path.sep}win-unpacked${path.sep}`) || !app.isPackaged
+  }
+
+  /**
+   * Keeps the icon and description of taskbar pins in step with the profile.
+   * A pin's label is its file name, which Windows references by path, so the
+   * name itself cannot follow a rename without re-pinning.
+   */
+  private async refreshPinnedShortcuts(profile: ClaudeProfile): Promise<void> {
+    const install = await this.install().catch(() => null)
+    if (!install) {
+      return
+    }
+    for (const directory of await this.pinnedShortcutDirectories()) {
+      for (const shortcut of await this.readShortcuts(directory)) {
+        if (!(shortcut.details.args?.replaceAll('"', '') ?? '').includes(`--launch-profile=${profile.id}`)) {
+          continue
+        }
+        try {
+          shell.writeShortcutLink(shortcut.path, 'update', { target: shortcut.details.target ?? process.execPath, icon: this.profileIconPath(profile.color, install), iconIndex: 0, description: `Claude profile: ${profile.name}` })
+        } catch { /* A pin that cannot be written keeps its old look. */ }
+      }
+    }
+  }
+
+  /** Taskbar pins: explicit ones and the per-AUMID "implicit" ones Windows makes for pinned windows. */
+  private async pinnedShortcutDirectories(): Promise<string[]> {
+    const root = path.join(this.appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned')
+    const result = [path.join(root, 'TaskBar')]
+    try {
+      const implicit = path.join(root, 'ImplicitAppShortcuts')
+      for (const entry of await readdir(implicit, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          result.push(path.join(implicit, entry.name))
+        }
+      }
+    } catch { /* No implicit pins. */ }
+    return result
   }
 
   private async readShortcuts(directory: string): Promise<Array<{ path: string, details: Electron.ShortcutDetails }>> {

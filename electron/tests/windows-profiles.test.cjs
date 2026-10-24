@@ -632,3 +632,55 @@ test('copying settings from the primary keeps the target login and device id and
   assert.deepEqual(sessions, ['local_1.json'])
   await assert.rejects(f.adapter.cloneSession('default', 'instance-CIM-Profile-test', false, 'full'), /Unsupported copy tier/)
 })
+
+test('pins and shortcuts of a manager at another location are claimed by the installed one', async t => {
+  const f = await fixture(t)
+  await f.put(f.target, 'instance.json', JSON.stringify({ name: 'Test', color: 'blue' }))
+  const pinRoot = path.join(f.appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned')
+  const implicit = path.join(pinRoot, 'ImplicitAppShortcuts', 'abc123')
+  await mkdir(path.join(pinRoot, 'TaskBar'), { recursive: true })
+  await mkdir(implicit, { recursive: true })
+  await writeFile(path.join(implicit, 'Test.lnk'), '')
+  await writeFile(path.join(pinRoot, 'TaskBar', 'Other.lnk'), '')
+  const foreign = path.join(f.root, 'win-unpacked', path.basename(process.execPath))
+  const written = []
+  f.electron.shell.readShortcutLink = file => file.endsWith('Test.lnk')
+    ? { target: foreign, args: '--launch-profile=instance-CIM-Profile-test' }
+    : { target: 'C:\\other\\tool.exe', args: '' }
+  f.electron.shell.writeShortcutLink = (file, operation, details) => { written.push({ file: path.basename(file), operation, details }); return true }
+  f.electron.app.isPackaged = true
+  await f.adapter.getState()
+  assert.deepEqual(written.map(item => [item.file, item.operation, item.details.target]), [['Test.lnk', 'update', process.execPath]])
+})
+
+test('an unpacked development build never claims pins of the installed manager', async t => {
+  const f = await fixture(t)
+  await f.put(f.target, 'instance.json', JSON.stringify({ name: 'Test', color: 'blue' }))
+  const desktop = f.electron.app.getPath()
+  await mkdir(desktop, { recursive: true })
+  await writeFile(path.join(desktop, 'Test.lnk'), '')
+  const written = []
+  f.electron.shell.readShortcutLink = () => ({ target: path.join('C:\\Program Files\\Claude Instance Manager', path.basename(process.execPath)), args: '--launch-profile=instance-CIM-Profile-test' })
+  f.electron.shell.writeShortcutLink = (file, operation, details) => { written.push({ file, operation, details }); return true }
+  f.electron.app.isPackaged = false
+  await f.adapter.getState()
+  assert.equal(written.length, 0)
+})
+
+test('renaming or recolouring an instance refreshes the icon and description of its taskbar pins', async t => {
+  const f = await fixture(t)
+  await f.put(f.target, 'instance.json', JSON.stringify({ name: 'Test', color: 'blue' }))
+  const pin = path.join(f.appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar')
+  await mkdir(pin, { recursive: true })
+  await writeFile(path.join(pin, 'Test.lnk'), '')
+  const written = []
+  f.electron.shell.readShortcutLink = () => ({ target: process.execPath, args: '--launch-profile=instance-CIM-Profile-test' })
+  f.electron.shell.writeShortcutLink = (file, operation, details) => { written.push({ file: path.basename(file), operation, details }); return true }
+  await f.adapter.setProfileColor('instance-CIM-Profile-test', 'amber')
+  await f.adapter.renameProfile('instance-CIM-Profile-test', 'Renamed')
+  const pins = written.filter(item => item.file === 'Test.lnk')
+  assert.equal(pins.length, 2)
+  assert.ok(pins[0].details.icon.endsWith('claude-profile-amber.ico'))
+  assert.equal(pins[1].details.description, 'Claude profile: Renamed')
+  assert.ok(pins.every(item => item.operation === 'update' && item.details.target === process.execPath), 'the pin file and target stay as they were')
+})
